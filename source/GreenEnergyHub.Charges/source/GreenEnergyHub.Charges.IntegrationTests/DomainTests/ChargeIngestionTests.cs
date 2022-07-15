@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Linq;
 using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,7 +21,9 @@ using System.Xml.Linq;
 using Energinet.DataHub.Core.FunctionApp.TestCommon;
 using FluentAssertions;
 using GreenEnergyHub.Charges.Core.DateTime;
+using GreenEnergyHub.Charges.Domain.Charges;
 using GreenEnergyHub.Charges.FunctionHost.Charges;
+using GreenEnergyHub.Charges.FunctionHost.Charges.MessageHub;
 using GreenEnergyHub.Charges.IntegrationTest.Core.Fixtures.FunctionApp;
 using GreenEnergyHub.Charges.IntegrationTest.Core.TestCommon;
 using GreenEnergyHub.Charges.IntegrationTest.Core.TestFiles.Charges;
@@ -295,6 +298,49 @@ namespace GreenEnergyHub.Charges.IntegrationTests.DomainTests
                 var responseAsString = await response.Content.ReadAsStringAsync();
                 responseAsString.Should().Contain("<Code>B2B-005</Code>");
                 responseAsString.Should().Contain("process.processType' element is invalid - The value 'A99' is invalid according to its datatype");
+            }
+
+            [Fact]
+            public async Task Given_ChargePriceMessageWithChargeInformationData_WhenPosted_ThenChargeInformationDataIsIgnored()
+            {
+                // Arrange
+                const string senderProvidedChargeId = "TestTar002";
+                const ChargeType chargeType = ChargeType.Tariff;
+                /*const string ownerGln = "5790000432752";*/
+                var ownerId = new Guid("ed6c94f3-24a8-43b3-913d-bf7513390a32");
+
+                await using var chargesDatabaseContext = Fixture.ChargesDatabaseManager.CreateDbContext();
+                await using var messageHubDatabaseContext = Fixture.MessageHubDatabaseManager.CreateDbContext();
+                var (request, _) = await _authenticatedHttpRequestGenerator
+                    .CreateAuthenticatedHttpPostRequestAsync(
+                        EndpointUrl, ChargeDocument.TariffPriceSeries);
+
+                // Act
+                var actual = await Fixture.HostManager.HttpClient.SendAsync(request);
+
+                // Assert
+                actual.StatusCode.Should().Be(HttpStatusCode.Accepted);
+                await FunctionAsserts.AssertHasExecutedAsync(
+                    Fixture.HostManager, nameof(ChargeConfirmationDataAvailableNotifierEndpoint)).ConfigureAwait(false);
+
+                var charge = chargesDatabaseContext.Charges.SingleOrDefault(x =>
+                    x.SenderProvidedChargeId == senderProvidedChargeId &&
+                    x.OwnerId == ownerId &&
+                    x.Type == chargeType);
+                charge.Should().NotBeNull();
+                charge!.Points.Should().NotBeEmpty();
+
+                var availableChargeData = messageHubDatabaseContext.AvailableChargeData.FirstOrDefault();
+                availableChargeData.Should().BeNull();
+
+                await FunctionAsserts.AssertHasExecutedAsync(
+                    Fixture.HostManager, nameof(ChargeDataAvailableNotifierEndpoint)).ConfigureAwait(false);
+
+                var availableChargeReceiptData = messageHubDatabaseContext.AvailableChargeReceiptData.FirstOrDefault();
+                availableChargeReceiptData.Should().NotBeNull();
+
+                // We need to clear host log after each test is done to ensure that we can assert on function executed on each test run because we only check on function name.
+                Fixture.HostManager.ClearHostLog();
             }
 
             [Fact(Skip = "Used for debugging ChargeCommandReceivedEventHandler")]
